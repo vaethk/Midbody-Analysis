@@ -1,0 +1,276 @@
+---
+title: "2022AUG18_MB_RNAseq"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tximport)
+library(tidyverse)
+library(ggplot2)
+library(DESeq2)
+library(msigdbr)
+library(here)
+library(tidyverse)
+library(ggvenn)
+library(ggpubr)
+library(ggrepel)
+```
+
+```{r}
+
+mart <- biomaRt::useMart("ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl", host='www.ensembl.org')
+t2g <- biomaRt::getBM(attributes = c('ensembl_transcript_id', 'ensembl_gene_id', 'external_gene_name', 'refseq_mrna'), mart = mart)
+t2g <- dplyr::rename(t2g, target_id= ensembl_transcript_id, ext_gene = external_gene_name)
+ens2gene <- t2g[,c(2,3)]
+colnames(ens2gene)[2] <- 'Gene'
+ens2gene <- unique(ens2gene)
+
+#mart <- biomaRt::useMart("ENSEMBL_MART_ENSEMBL", 
+ #                        dataset = "hsapiens_gene_ensembl", 
+  #                       host='www.ensembl.org')
+#t2g <- biomaRt::getBM(attributes = c('ensembl_transcript_id_version', 'ensembl_gene_id', 'external_gene_name', "gene_biotype"), mart = mart)
+#
+#tx2gene <- read_csv(file.path(system.file("extdata", package = "tximportData"),
+#                              "tx2gene.gencode.v27.csv"))
+
+#ens2gene <- t2g[,c(2,3,4)]
+#colnames(ens2gene)[2] <- 'Gene'
+#ens2gene <- unique(ens2gene)
+
+metadata <- data.frame(file = c("Control_1_out", "Control_2_out", 
+                                  "Midbody_1_out", "Midbody_2_out", 
+                                  "Hela_S59_L001_out", "MB_S58_L001_out"), 
+                       sample = c("Control", "Control",
+                                  "Midbody", "Midbody",
+                                  "Control", "Midbody"),
+                       rep = c("1", "2", "1", "2", "1", "1"), 
+                       run = c("2022", "2022", "2022", "2022", "2020", "2020" )
+                       )
+
+myquantfiles <- paste("/Users/katievaeth/Desktop/2022_MB_Salmon/",
+                      metadata$file,
+                      "/quant.sf",
+                      sep = "")
+names(myquantfiles) <- paste(metadata$sample, metadata$run, metadata$rep, sep = "_")
+
+myTxi <- tximport(myquantfiles, type = "salmon", tx2gene = t2g, ignoreTxVersion = T)
+```
+
+```{r}
+
+sample_info <- metadata %>% dplyr::select(sample, run, rep)
+  sample_info$sample <- as.factor(sample_info$sample)
+  sample_info$sample <- relevel(sample_info$sample, ref = "Control") #for the design of DESeq, we want the control variable to be the first level
+
+
+ddsTxi <- DESeqDataSetFromTximport(myTxi, 
+                                   colData = sample_info, 
+                                   design = ~ sample) #design formula- the variable of interest should be the last variable 
+dds <- DESeq(ddsTxi)
+
+res <- results(dds)
+vst <- varianceStabilizingTransformation(dds)
+pcaplotdata <- plotPCA(vst, intgroup=c("sample", "run"), returnData = TRUE)
+precentVar <- round(100 * attr(pcaplotdata, "percentVar"))
+
+ggplot(pcaplotdata, aes(PC1, PC2, color = sample)) + 
+  geom_point(size = 4, shape = 1, stroke = 1) + 
+  xlab(paste0("PC1:", precentVar[1], "% variance")) + 
+  ylab(paste0("PC2:", precentVar[2], "% variance")) + 
+  coord_fixed() + 
+  theme_classic() + 
+  scale_color_brewer(palette = "Paired") +
+  theme(axis.title = element_text(size = 12, face = "bold")) + 
+  theme(legend.title = element_blank(),
+           legend.justification=c(1,0), 
+           legend.position=c(0.95, 0.45)) + 
+  geom_label_repel(aes(label = group) box.padding = 0.5)
+```
+
+```{r}
+res_df <- as.data.frame(res) %>%  mutate(ensembl_gene_id = rownames(res))
+
+res_df <- res_df %>% full_join(., ens2gene, by = "ensembl_gene_id") %>% arrange(desc(log2FoldChange)) %>% filter(baseMean > 250) %>% filter(baseMean < 10000)
+
+#write.csv(res_df, "2022JULY20_DEseq_sample_only.csv", row.names = F)
+write.csv(res_df, "2022JULY26_MB_RNAseq.csv", row.names = F)
+
+res_df_sig <- res_df %>%  filter(padj <= 0.05) 
+
+res_df_sig_MB <- res_df_sig %>% filter(log2FoldChange > 0)
+
+res_df_sig_soma <- res_df_sig %>% filter(log2FoldChange < 0)
+
+write.csv(res_df_sig_MB, "2022JULY27_MB_enriched.csv", row.names = F)
+write.csv(res_df_sig_soma, "2022JULY27_Hela_enriched.csv", row.names = F)
+```
+
+```{r}
+
+dffff <- myTxi$abundance %>% data.frame()
+dffff$names <- rownames(dffff) 
+dffff <- dffff  %>% rowwise() %>% filter(names == "ENSG00000074319") %>%  mutate ( m = sum(c_across(c(Control_2020_1:Midbody_2020_1))))
+
+ribosome_genes <- subset(res_df_sig, startsWith(as.character(Gene), "RP"))
+
+RP_plot <- res_df_sig %>% mutate(Ribosome = ifelse(res_df_sig$Gene %in% ribosome_genes$Gene, "Ribo", "Not Ribo")) 
+  RP_plot$Ribosome <- as.factor(RP_plot$Ribosome)
+  RP_plot$Ribosome <- relevel(RP_plot$Ribosome, ref = "Ribo")
+ggplot(RP_plot, aes(Ribosome, log2FoldChange, color = Ribosome)) + geom_boxplot() + scale_color_brewer(palette = "Paired") + theme_classic() + theme(legend.position = "none")
+```
+
+```{r}
+MT_genes <- subset(res_df_sig, startsWith(as.character(Gene), "MT"))
+
+M_plot <- res_df_sig %>% mutate(Mt = ifelse(res_df_sig$Gene %in% MT_genes$Gene, "Mt", "Not Mt"))
+ggplot(M_plot, aes(Mt, log2FoldChange, color = Mt)) + geom_boxplot() + scale_color_brewer(palette = "Paired") + theme_classic() + theme(legend.position = "none")
+```
+```{r}
+Localized_genes <- res_df %>% filter(res_df$Gene %in% c("AFAP1L1", "OGT", "PAXBP1","FNBP4" , "TRAK2", "RAB13", "CPLX2", "NET1", "CDC42BPG", "GDF11","AKAP12", "TRP53INP2", "KIF5B")) %>% mutate(Loc = ifelse(Gene %in% c("TRAK2", "CPLX2", "NET1", "CDC42BPG", "GDF11", "TRNP53INP2", "RAB13"), "Localized", "Not localized")) 
+
+Localized_genes$Gene <- factor(Localized_genes$Gene, c("AFAP1L1", "OGT", "PAXBP1","FNBP4" , "TRAK2", "RAB13", "CPLX2", "NET1", "CDC42BPG", "GDF11","AKAP12", "TRP53INP2", "KIF5B"))
+
+
+Localized_plot <- res_df %>% mutate(Loc = ifelse(Gene %in% c("TRAK2", "CPLX2", "NET1", "CDC42BPG", "GDF11", "TRNP53INP2"), "Localized", "Not localized"))
+
+ggplot(Localized_plot, aes(Loc, log2FoldChange, color = Loc)) + geom_boxplot() + scale_color_brewer(palette = "Paired") + theme_classic() + theme(legend.position = "none")
+
+
+ggpubr::ggdotchart(Localized_genes, "Gene", "log2FoldChange", color = "Loc") + theme_classic()  + scale_color_brewer(palette = "Paired") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+```{r}
+res_df_volcano <- res_df %>% mutate(Log_pval = -log10(res_df$padj)) %>% mutate(FDR = ifelse(padj <= 0.05, "Significant", "Not Significant")) %>% filter(padj != "NA")
+
+ggplot(res_df_volcano, aes(x = log2FoldChange, y = Log_pval, color = FDR)) +
+  geom_point() + 
+  theme_classic()  + 
+  scale_color_brewer(palette = "Paired") + 
+  labs(x = "Midbody / Whole Cell, log2FC", y = "FDR, -Log10") +
+  theme(axis.title = element_text(size = 12, face = "bold")) + 
+  theme(legend.title = element_text(  ),
+           legend.justification=c(1,0), 
+           legend.position=c(0.95, 0.45),  
+           legend.background = element_blank(),
+           legend.key = element_blank())
+```
+
+```{r}
+qPCR_genes <- res_df %>% filter(Gene %in% c("RAB13", "NET1", "TSG101"))
+
+write_csv(qPCR_genes, "qPCR_genes.csv")
+
+
+```
+
+
+```{r, correlations }
+AB_data <- readRDS("~/3'UTR/All_AB_LRs.rds")  %>% select(c(AB_pval, AB_FC,ave_tpm, ensembl_gene_id, Gene_name))
+colnames(AB_data)[5] <- "Gene"
+colnames(AB_data)[2] <- "Log2FoldChange_AB"
+
+
+
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+m2h <- getBM(attributes = c('ensembl_gene_id', 'hsapiens_homolog_ensembl_gene'), mart = mouse) %>%
+        filter(., hsapiens_homolog_ensembl_gene != '')
+
+m2h <- unique(m2h)
+colnames(m2h)[1] <- "Mouse_Gene"
+colnames(m2h)[2] <- "Human_Gene"
+
+neurite_data <- read.table("~/3'UTR/FractionationLR_z.txt", header = TRUE)
+colnames(neurite_data)[1] <- "Mouse_Gene"
+
+neurite_data <- neurite_data %>% inner_join(., m2h, by = "Mouse_Gene" ) %>% filter(., !is.na(CADvanilla1))
+Neuron_LR <- rowMeans(neurite_data[,3:5], na.rm = TRUE)
+
+neurite_data <- neurite_data[,c(1,3,4,5,40)]  
+neurite_data$Log2FoldChange_neurite <- Neuron_LR
+colnames(neurite_data)[5] <- "ensembl_gene_id"
+
+neurite_data <- neurite_data %>% full_join(., ens2gene, by = "ensembl_gene_id")
+
+MB_data <- res_df
+colnames(MB_data)[2] <- "Log2FoldChange_MB"
+```
+
+```{r}
+
+LogFC_all <-neurite_data %>%  full_join(., MB_data, by = "Gene") %>% full_join(., AB_data, by = "Gene") 
+
+MB_vs_AB<- cor.test(LogFC_all$Log2FoldChange_AB, LogFC_all$Log2FoldChange_MB, method = 'spearman')
+
+MB_vs_neurite<- cor.test(LogFC_all$Log2FoldChange_neurite, LogFC_all$Log2FoldChange_MB, method = 'spearman')
+
+print(MB_vs_AB); print(MB_vs_neurite)
+
+ggplot(LogFC_all, aes(Log2FoldChange_neurite, Log2FoldChange_MB, alpha = 0.05)) + geom_point()
+ggplot(LogFC_all, aes(Log2FoldChange_AB, Log2FoldChange_MB, alpha = 0.05)) + geom_point()
+```
+
+```{r}
+Neurite.VD <-  LogFC_all %>% filter(., LogFC_all$Log2FoldChange_neurite >= 1) 
+MB.VD <- LogFC_all %>% filter(., LogFC_all$Log2FoldChange_MB >= 1) 
+  MB.VD <- MB.VD %>% filter(., pvalue <= 0.05)
+
+  
+MB_vs_Neurite<- list(
+  Midbody = MB.VD$Gene,
+  Neurite = Neurite.VD$Gene
+)
+
+
+ggvenn(MB_vs_Neurite, fill_color = c("royal blue", "red"), set_name_size = 4, show_percentage = FALSE) +
+  annotate("text", x = 0, y = 1.7, label = "Localization in Midbody and Neurite", size = 6) #+ annotate('text', x = 0,y = -1.4, label = paste0('Fold Change = ', Fold_Change)) #+ annotate('text', x = 0,y = -1.2, label = paste0('p = ', p.n)) 
+```
+
+```{r, localized to MB, also localized to neurites?? }
+
+MB_loc <- res_df_sig %>% filter(log2FoldChange >= 0)
+
+Neurite_MB_loc <- neurite_data %>% mutate(MB = ifelse(neurite_data$ensembl_gene_id %in% MB_loc$ensembl_gene_id, "Localized to Midbody", "All Other Genes"))
+
+ggplot(Neurite_MB_loc, aes(x = MB, y = Log2FoldChange_neurite, color = MB)) + geom_boxplot() + labs(x = "", y = "Neurite Log2FC") + theme_classic()+ scale_color_brewer(palette = "Paired") + theme_classic() + theme(legend.position = "none") + stat_compare_means( method = "t.test", ref.group = "All Other Genes")
+
+
+#is this the same in the opposite direction? 
+
+Neurite_loc <- neurite_data %>% filter( Log2FoldChange_neurite >= 1)
+MB_neurite_Loc <- res_df_sig %>%  mutate(Neurite = ifelse(res_df_sig$ensembl_gene_id %in% Neurite_loc$ensembl_gene_id, "Localized to Neurite", "All Other Genes"))
+
+
+ggplot(MB_neurite_Loc, aes(x = Neurite, y = log2FoldChange, color = Neurite)) +geom_boxplot() + labs(x = "", y = "Midbody Log2FC") + theme_classic()+ scale_color_brewer(palette = "Paired") + theme_classic() + theme(legend.position = "none") + stat_compare_means( method = "t.test", ref.group = "All Other Genes")
+```
+
+```{r, same as above just for epithelial cells!}
+
+AB_MB_Loc <- AB_data %>% mutate(MB = ifelse(AB_data$ensembl_gene_id %in% MB_loc$ensembl_gene_id, "Localized to Midbody", "All Other Genes")) %>% filter(AB_pval <= 0.05)
+
+ggplot(AB_MB_Loc, aes(y = Log2FoldChange_AB, x = MB, color = MB)) + 
+  geom_boxplot() + 
+  labs(x = "", y = "Apical/Basal Log2FC") + 
+  theme_classic()+ scale_color_brewer(palette = "Paired") + 
+  theme_classic() + theme(legend.position = "none") + 
+  stat_compare_means( method = "t.test", ref.group = "All Other Genes")
+
+
+```
+
+```{r, Log2FC for single rep}
+
+#Obtain the normalized count data from dds 
+
+counts_dds <- DESeq2::counts(dds, normalized = TRUE) %>% as.data.frame %>% 
+  mutate(MB_Cell_1 = Midbody_2020_1 / Control_2020_1 ) %>% 
+  mutate(MB_Cell_2 = Midbody_2022_1 / Control_2022_1) %>% 
+  mutate(MB_Cell_3 = Midbody_2022_2 / Control_2022_2)
+
+
+
+```
+
+```{r}
+
+```
+
