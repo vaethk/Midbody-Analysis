@@ -1,7 +1,10 @@
 ---
-title: "2022AUG18_MB_RNAseq"
+title: "MB_RNAseq"
+author: "Katie Vaeth"
+date: "7/19/2022"
 output: html_document
 ---
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tximport)
@@ -14,10 +17,12 @@ library(tidyverse)
 library(ggvenn)
 library(ggpubr)
 library(ggrepel)
+library(RColorBrewer)
+
+MTcols <- c("pink", "purple", "orange")
 ```
 
-```{r}
-
+```{r mart}
 mart <- biomaRt::useMart("ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl", host='www.ensembl.org')
 t2g <- biomaRt::getBM(attributes = c('ensembl_transcript_id', 'ensembl_gene_id', 'external_gene_name', 'refseq_mrna'), mart = mart)
 t2g <- dplyr::rename(t2g, target_id= ensembl_transcript_id, ext_gene = external_gene_name)
@@ -36,14 +41,17 @@ ens2gene <- unique(ens2gene)
 #ens2gene <- t2g[,c(2,3,4)]
 #colnames(ens2gene)[2] <- 'Gene'
 #ens2gene <- unique(ens2gene)
+```
 
+
+```{r tximport}
 metadata <- data.frame(file = c("Control_1_out", "Control_2_out", 
                                   "Midbody_1_out", "Midbody_2_out", 
                                   "Hela_S59_L001_out", "MB_S58_L001_out"), 
                        sample = c("Control", "Control",
                                   "Midbody", "Midbody",
                                   "Control", "Midbody"),
-                       rep = c("1", "2", "1", "2", "1", "1"), 
+                       rep = c("1", "2", "1", "2", "3", "3"), 
                        run = c("2022", "2022", "2022", "2022", "2020", "2020" )
                        )
 
@@ -56,8 +64,7 @@ names(myquantfiles) <- paste(metadata$sample, metadata$run, metadata$rep, sep = 
 myTxi <- tximport(myquantfiles, type = "salmon", tx2gene = t2g, ignoreTxVersion = T)
 ```
 
-```{r}
-
+```{r DEseq}
 sample_info <- metadata %>% dplyr::select(sample, run, rep)
   sample_info$sample <- as.factor(sample_info$sample)
   sample_info$sample <- relevel(sample_info$sample, ref = "Control") #for the design of DESeq, we want the control variable to be the first level
@@ -70,27 +77,37 @@ dds <- DESeq(ddsTxi)
 
 res <- results(dds)
 vst <- varianceStabilizingTransformation(dds)
-pcaplotdata <- plotPCA(vst, intgroup=c("sample", "run"), returnData = TRUE)
+pcaplotdata <- plotPCA(vst, intgroup=c("sample", "run", "rep"), returnData = TRUE)
 precentVar <- round(100 * attr(pcaplotdata, "percentVar"))
+```
 
-ggplot(pcaplotdata, aes(PC1, PC2, color = sample)) + 
-  geom_point(size = 4, shape = 1, stroke = 1) + 
+```{r PCA plot}
+ggplot(pcaplotdata, aes(PC1, PC2, color = sample, fill = sample, label = paste0("Rep", rep))) +
+  geom_label_repel( box.padding = 0.5, 
+                    min.segment.length = 0, 
+                    family = "Arial", 
+                    color = "black", 
+                    fill = c("pink", "pink", "purple", "purple", "pink", "purple")) + 
+  geom_point(shape = 23, size = 4, stroke = .5) + 
   xlab(paste0("PC1:", precentVar[1], "% variance")) + 
   ylab(paste0("PC2:", precentVar[2], "% variance")) + 
   coord_fixed() + 
-  theme_classic() + 
-  scale_color_brewer(palette = "Paired") +
-  theme(axis.title = element_text(size = 12, face = "bold")) + 
+  theme_classic(16) + 
+  scale_color_manual(values = MTcols) +
+  scale_fill_manual(values =c("#FFDBE9", "#CBC3E3")) +
   theme(legend.title = element_blank(),
            legend.justification=c(1,0), 
-           legend.position=c(0.95, 0.45)) + 
-  geom_label_repel(aes(label = group) box.padding = 0.5)
+           legend.position=c(0.95, 0.45),
+        text = element_text(family = "Arial")) + 
+ guides(color = guide_legend(override.aes = aes(label = "")))
 ```
 
-```{r}
+
+```{r res_df filtering df for analysis}
+
 res_df <- as.data.frame(res) %>%  mutate(ensembl_gene_id = rownames(res))
 
-res_df <- res_df %>% full_join(., ens2gene, by = "ensembl_gene_id") %>% arrange(desc(log2FoldChange)) %>% filter(baseMean > 250) %>% filter(baseMean < 10000)
+res_df <- res_df %>% full_join(., ens2gene, by = "ensembl_gene_id") %>% arrange(desc(log2FoldChange)) %>% filter(baseMean > 250) %>% filter(baseMean < 10100)
 
 #write.csv(res_df, "2022JULY20_DEseq_sample_only.csv", row.names = F)
 write.csv(res_df, "2022JULY26_MB_RNAseq.csv", row.names = F)
@@ -103,14 +120,11 @@ res_df_sig_soma <- res_df_sig %>% filter(log2FoldChange < 0)
 
 write.csv(res_df_sig_MB, "2022JULY27_MB_enriched.csv", row.names = F)
 write.csv(res_df_sig_soma, "2022JULY27_Hela_enriched.csv", row.names = F)
+
 ```
 
-```{r}
 
-dffff <- myTxi$abundance %>% data.frame()
-dffff$names <- rownames(dffff) 
-dffff <- dffff  %>% rowwise() %>% filter(names == "ENSG00000074319") %>%  mutate ( m = sum(c_across(c(Control_2020_1:Midbody_2020_1))))
-
+```{r ribosome}
 ribosome_genes <- subset(res_df_sig, startsWith(as.character(Gene), "RP"))
 
 RP_plot <- res_df_sig %>% mutate(Ribosome = ifelse(res_df_sig$Gene %in% ribosome_genes$Gene, "Ribo", "Not Ribo")) 
@@ -119,13 +133,14 @@ RP_plot <- res_df_sig %>% mutate(Ribosome = ifelse(res_df_sig$Gene %in% ribosome
 ggplot(RP_plot, aes(Ribosome, log2FoldChange, color = Ribosome)) + geom_boxplot() + scale_color_brewer(palette = "Paired") + theme_classic() + theme(legend.position = "none")
 ```
 
-```{r}
+```{r mitochondria}
 MT_genes <- subset(res_df_sig, startsWith(as.character(Gene), "MT"))
 
 M_plot <- res_df_sig %>% mutate(Mt = ifelse(res_df_sig$Gene %in% MT_genes$Gene, "Mt", "Not Mt"))
 ggplot(M_plot, aes(Mt, log2FoldChange, color = Mt)) + geom_boxplot() + scale_color_brewer(palette = "Paired") + theme_classic() + theme(legend.position = "none")
 ```
-```{r}
+
+```{r localized genes previous MPRA}
 Localized_genes <- res_df %>% filter(res_df$Gene %in% c("AFAP1L1", "OGT", "PAXBP1","FNBP4" , "TRAK2", "RAB13", "CPLX2", "NET1", "CDC42BPG", "GDF11","AKAP12", "TRP53INP2", "KIF5B")) %>% mutate(Loc = ifelse(Gene %in% c("TRAK2", "CPLX2", "NET1", "CDC42BPG", "GDF11", "TRNP53INP2", "RAB13"), "Localized", "Not localized")) 
 
 Localized_genes$Gene <- factor(Localized_genes$Gene, c("AFAP1L1", "OGT", "PAXBP1","FNBP4" , "TRAK2", "RAB13", "CPLX2", "NET1", "CDC42BPG", "GDF11","AKAP12", "TRP53INP2", "KIF5B"))
@@ -138,32 +153,42 @@ ggplot(Localized_plot, aes(Loc, log2FoldChange, color = Loc)) + geom_boxplot() +
 
 ggpubr::ggdotchart(Localized_genes, "Gene", "log2FoldChange", color = "Loc") + theme_classic()  + scale_color_brewer(palette = "Paired") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 ```
-```{r}
-res_df_volcano <- res_df %>% mutate(Log_pval = -log10(res_df$padj)) %>% mutate(FDR = ifelse(padj <= 0.05, "Significant", "Not Significant")) %>% filter(padj != "NA")
 
-ggplot(res_df_volcano, aes(x = log2FoldChange, y = Log_pval, color = FDR)) +
-  geom_point() + 
-  theme_classic()  + 
-  scale_color_brewer(palette = "Paired") + 
-  labs(x = "Midbody / Whole Cell, log2FC", y = "FDR, -Log10") +
-  theme(axis.title = element_text(size = 12, face = "bold")) + 
-  theme(legend.title = element_text(  ),
-           legend.justification=c(1,0), 
-           legend.position=c(0.95, 0.45),  
-           legend.background = element_blank(),
-           legend.key = element_blank())
+
+```{r, volcano plot}
+res_df_volcano <- res_df %>% mutate(Log_pval = -log10(res_df$padj)) %>% 
+  filter(padj != "NA") %>% 
+  mutate(FDR = case_when(padj <= 0.05 & log2FoldChange > 0 ~ "Enriched in Midbody",
+                         padj <= 0.05 & log2FoldChange < 0 ~ "Depleted in Midbody", 
+                         TRUE ~"Not Significant"))
+
+table(res_df_volcano$FDR)[1]
+
+ggplot(res_df_volcano, aes(x = log2FoldChange, y = Log_pval, color = FDR, alpha = 0.9)) +
+  geom_point(shape = 19) + 
+  theme_classic(16)  + 
+  scale_color_manual(values = c(MTcols[1:2], "light grey")) +
+  labs(x = "Midbody / Whole Cell, Log2", y = "FDR, -Log10") + 
+  theme(legend.title = element_blank(),
+        legend.position = "none", 
+        text = element_text(family = "Arial")) + 
+  annotate("text", x = -6.5, y = 13, 
+           label = paste0("Depleted in Midbody \n n = ", table(res_df_volcano$FDR)[1]), size = 4) + 
+  annotate("text", x = 6.5, y = 13, 
+           label = paste0("Enriched in Midbody \n n = ", table(res_df_volcano$FDR)[2]), size = 4)
+
+display.brewer.pal(20, "Paired")
+brewer.pal(12, "Paired")
 ```
 
-```{r}
+```{r, qPCR genes}
 qPCR_genes <- res_df %>% filter(Gene %in% c("RAB13", "NET1", "TSG101"))
 
 write_csv(qPCR_genes, "qPCR_genes.csv")
-
-
 ```
 
 
-```{r, correlations }
+```{r, correlations with AB and Neurite}
 AB_data <- readRDS("~/3'UTR/All_AB_LRs.rds")  %>% select(c(AB_pval, AB_FC,ave_tpm, ensembl_gene_id, Gene_name))
 colnames(AB_data)[5] <- "Gene"
 colnames(AB_data)[2] <- "Log2FoldChange_AB"
@@ -189,15 +214,15 @@ neurite_data <- neurite_data[,c(1,3,4,5,40)]
 neurite_data$Log2FoldChange_neurite <- Neuron_LR
 colnames(neurite_data)[5] <- "ensembl_gene_id"
 
-neurite_data <- neurite_data %>% full_join(., ens2gene, by = "ensembl_gene_id")
+neurite_data <- neurite_data %>% left_join(., ens2gene, by = "ensembl_gene_id")
 
 MB_data <- res_df
 colnames(MB_data)[2] <- "Log2FoldChange_MB"
 ```
 
-```{r}
+```{r correlation}
 
-LogFC_all <-neurite_data %>%  full_join(., MB_data, by = "Gene") %>% full_join(., AB_data, by = "Gene") 
+LogFC_all <-MB_data %>%  full_join(., neurite_data, by = "Gene") %>% full_join(., AB_data, by = "Gene") 
 
 MB_vs_AB<- cor.test(LogFC_all$Log2FoldChange_AB, LogFC_all$Log2FoldChange_MB, method = 'spearman')
 
@@ -205,11 +230,17 @@ MB_vs_neurite<- cor.test(LogFC_all$Log2FoldChange_neurite, LogFC_all$Log2FoldCha
 
 print(MB_vs_AB); print(MB_vs_neurite)
 
-ggplot(LogFC_all, aes(Log2FoldChange_neurite, Log2FoldChange_MB, alpha = 0.05)) + geom_point()
-ggplot(LogFC_all, aes(Log2FoldChange_AB, Log2FoldChange_MB, alpha = 0.05)) + geom_point()
+ggplot(LogFC_all, aes(Log2FoldChange_neurite, Log2FoldChange_MB)) + geom_point(color = (padj > 0.05)) + theme_classic(16) + scale_color_brewer(palette = "paired") + labs(title = "Correlation between RNA localization to Midbody and Neurite") + xlab("Neurite / Soma, Log2FC") + xlab("Midbody / Whole Cell, Log2FC")
+
+
+ggplot(LogFC_all, aes(Log2FoldChange_AB, Log2FoldChange_MB)) + 
+  geom_point(color = padj > 0.05) + 
+  theme_classic(16) + 
+  scale_color_brewer(palette = "paired") + 
+  labs(title = "Correlation between RNA localization to Midbody and Epithelial cell") + xlab("Apical / Basal, Log2FC") + xlab("Midbody / Whole Cell, Log2FC")
 ```
 
-```{r}
+```{r vennDiagram}
 Neurite.VD <-  LogFC_all %>% filter(., LogFC_all$Log2FoldChange_neurite >= 1) 
 MB.VD <- LogFC_all %>% filter(., LogFC_all$Log2FoldChange_MB >= 1) 
   MB.VD <- MB.VD %>% filter(., pvalue <= 0.05)
@@ -257,20 +288,492 @@ ggplot(AB_MB_Loc, aes(y = Log2FoldChange_AB, x = MB, color = MB)) +
 
 ```
 
-```{r, Log2FC for single rep}
 
+```{r, LogFC for individual reps Fold Change}
+data_summ
 #Obtain the normalized count data from dds 
 
-counts_dds <- DESeq2::counts(dds, normalized = TRUE) %>% as.data.frame %>% 
-  mutate(MB_Cell_1 = Midbody_2020_1 / Control_2020_1 ) %>% 
-  mutate(MB_Cell_2 = Midbody_2022_1 / Control_2022_1) %>% 
-  mutate(MB_Cell_3 = Midbody_2022_2 / Control_2022_2)
+counts_dds <- DESeq2::counts(dds, normalized = TRUE) %>% as.data.frame() %>% 
+  mutate(MB_Cell_3 = (Midbody_2020_3 / Control_2020_3) ) %>% 
+  mutate(MB_Cell_1 = (Midbody_2022_1 / Control_2022_1)) %>% 
+  mutate(MB_Cell_2 = (Midbody_2022_2 / Control_2022_2)) %>% rownames_to_column(var = "ensembl_gene_id")
+
+view(counts_dds)
 
 
+list_genes <- data.frame(Gene = c( "CDK11A", "CDK11B","CIT", "CHMP4B", "CHMP2A", "CHMP3", "CHMP6", "AKTIP", "CEP55", "TSG101", "PDCD6IP", "VPS4A")) 
 
+#ALIX = PDCD6IP
+
+#VPS4 = VPS4A
+
+#citron kinase = CIT
+
+list_genes <- list_genes %>% left_join(., ens2gene, by = "Gene")
+
+selected_genes <- list_genes %>% left_join(., counts_dds, by = "ensembl_gene_id")
+
+pvals <- res_df %>% filter(res_df$Gene %in% c( "CDK11A", "CDK11B","CIT", "CHMP4B", "CHMP2A", "CHMP3", "CHMP6", "AKTIP", "CEP55", "TSG101", "PDCD6IP", "VPS4A")) %>% dplyr::select(ensembl_gene_id, Gene, padj)
+
+one <- selected_genes %>% dplyr::select(Gene, MB_Cell_1)
+colnames(one)[2] <- "FC"
+one <- one %>% left_join(., pvals, by = "Gene")
+one$rep <- rep("Rep 1", nrow(one))
+two <- selected_genes %>% dplyr::select(Gene, MB_Cell_2)
+colnames(two)[2] <- "FC"
+two <- two %>% left_join(., pvals, by = "Gene")
+two$rep <- rep("Rep 2", nrow(two))
+three <- selected_genes %>% dplyr::select(Gene, MB_Cell_3)
+colnames(three)[2] <- "FC"
+three <- three %>% left_join(., pvals, by = "Gene")
+three$rep <- rep("Rep 3", nrow(three))
+
+selected_genes_plot <- rbind(one, two, three)
+
+selected_genes_plot$Gene <- factor(selected_genes_plot$Gene, levels = c("CIT", "CDK11A", "CDK11B", "AKTIP", "CHMP4B", "CHMP2A", "CHMP3", "CHMP6", "CEP55", "TSG101", "PDCD6IP", "VPS4A"))
+
+barplot_log2FC<-ggbarplot(selected_genes_plot, "Gene","FC", add = c("mean_se"), color = "padj") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 8)) + labs(y = "MB / Whole Cell, Log2FC")
+
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c("mean" = varname))
+ return(data_sum)
+}
+
+data_sum <- data_summary(selected_genes_plot, varname = "FC", groupnames = "Gene")
+data_sum$se <- data_sum$sd / sqrt(3)
+
+data_sum$Gene <- ifelse(data_sum$Gene == "PDCD6IP", "ALIX (PDCD6IP)", as.character(data_sum$Gene)) 
+selected_genes_plot$Gene <- ifelse(selected_genes_plot$Gene == "PDCD6IP", "ALIX (PDCD6IP)", as.character(selected_genes_plot$Gene))
+data_sum$Gene <- ifelse(data_sum$Gene == "CIT", "CIT (citron kinase)", as.character(data_sum$Gene)) 
+selected_genes_plot$Gene <- ifelse(selected_genes_plot$Gene == "CIT", "CIT (citron kinase)", as.character(selected_genes_plot$Gene))
+
+
+data_sum$Gene <- factor(data_sum$Gene, levels = data_sum$Gene)
+
+
+ggplot(data_sum, aes(Gene, FC)) +
+  geom_bar(stat="identity", width=.7, fill = "white", colour="black") + 
+  geom_point(data = selected_genes_plot, mapping = aes(x = Gene, y = FC, color = rep), size = 2,
+             inherit.aes = FALSE) + 
+  theme_classic(16, base_family = "Arial") + 
+  theme(axis.text.x = element_text(angle = 90), 
+        text = element_text(family = "Arial")) + 
+  scale_color_manual(values = MTcols) + 
+  geom_errorbar(data = data_sum, 
+                mapping = aes(x = Gene, ymin = FC - se, ymax = FC + se, width = 0.3), 
+                inherit.aes = FALSE) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 8)) + 
+  ylab("Midbody / Whole Cell, Fold Change") + 
+  xlab("")+
+  theme(legend.title = element_blank(),
+        legend.position = c(0.95, .75),
+        legend.background = element_blank(),
+        legend.key = element_blank(), 
+        text = element_text(family = "Arial")) + 
+    geom_hline(yintercept= 1, linetype="dashed", 
+                color = "red", size=.7)
+
+```
+
+```{r GO pathway plotting}
+GO_pathway <- data.frame(Fold_Enrichment = c(2.68, 2.14, 2.1, 2.07, 1.97, 1.73, 1.55, 1.4, 1.32, 1.3, 1.29, 1.27, 1.23, 1.22))
+
+GO_pathway$Pvalue <- c(5.44E-13, 4.33E-05, 5.69E-05, 4.69E-04, 1.01E-09, 2.98E-06, 1.24E-04, 1.86E-04, 4.15E-04, 2.70E-07, 1.28E-04, 4.80E-04, 8.23E-05, 1.43E-05)
+
+GO_pathway$neg_log10_pval <- -log10(GO_pathway$Pvalue)
+
+GO_pathway$Pathway <- c("Cytoplasmic Translation", "Ribosomal Large Subunit Biogenesis", "Ribosomal Small Subunit Biogenesis", "Ribosome Assembly","rRNA processing","Ribonucleoprotein Complex Assembly","mRNA splicing via Spliceosome","Regulation of Translation","Microtubule Cytoskeleton Organization","Regulation of Organelle Organization","Cellular Response to DNA Damage Stimulus","Regulation of Cell Cycle Process","Cell Cycle","Cellular Catabolic Process")
+
+
+ggplot(GO_pathway, aes(y = reorder(Pathway, -neg_log10_pval), x = neg_log10_pval)) +
+  geom_bar(stat="identity", width=.7, fill = "white", colour="black") + 
+  theme_classic(16) + 
+  theme(axis.text.x = element_text(angle = 90, size = 10), 
+        legend.title = element_blank()) + 
+  scale_color_manual(values = MTcols) + 
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 16)) + 
+  xlab("-log10(p-value)") +
+  ylab("Pathway")+
+  geom_vline(xintercept=-log10(0.05), linetype="dashed", 
+                color = "red", size=.5) 
+
+```
+
+```{r heatmap }
+
+library(pheatmap)
+qcinput <- log2(myTxi$abundance + 1)
+
+qcCor <- cor(qcinput, method = "spearman")
+
+annot_cols <- data.frame( str_split(colnames(qcCor), pattern = "_" ), 
+                          row.names = c("Sample", "Year", "Rep"))
+colnames(annot_cols) <- colnames(qcCor)
+annot_cols <- data.frame(t(annot_cols)) %>% dplyr::select(Sample, Rep)
+               #row.names = c("R", "Sample", "Year", "Rep"))
+                          
+pheatmap::pheatmap(
+  qcCor, display_numbers = T, number_format = "%.2f", 
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "ward.D2",
+  color = colorRampPalette(c("purple", "pink", "orange"))(100), 
+  labels_row=c("Control, Rep 1", "Control, Rep 2", "Midbody, Rep 1", "Midbody, Rep 2", "Control, Rep 3", "Midbody, Rep 3"), 
+  labels_col=c("Control, Rep 1", "Control, Rep 2", "Midbody, Rep 1", "Midbody, Rep 2", "Control, Rep 3", "Midbody, Rep 3"), 
+  number_color  = "Black", 
+  fontsize = 16)
+
+rownames(qcCor) <- c("Control, Rep 1", "Control, Rep 2", "Midbody, Rep 1", "Midbody, Rep 2", "Control, Rep 3", "Midbody, Rep 3")
+
+colnames(qcCor) <- c("Control, Rep 1", "Control, Rep 2", "Midbody, Rep 1", "Midbody, Rep 2", "Control, Rep 3", "Midbody, Rep 3")
+
+factor(colnames(qcCor), levels = c("Control, Rep 1", "Control, Rep 2","Control, Rep 3", "Midbody, Rep 1", "Midbody, Rep 2", "Midbody, Rep 3"))
+factor(rownames(qcCor), levels = c("Control, Rep 1", "Control, Rep 2","Control, Rep 3", "Midbody, Rep 1", "Midbody, Rep 2", "Midbody, Rep 3"))
+
+pheatmap(
+  qcCor, display_numbers = T, number_format = "%.2f", 
+  color = colorRampPalette(c("purple", "pink"))(100), 
+  number_color  = "Black", 
+  fontsize = 16, 
+  legend = F)
+
+heatmap(qcCor, row_order = c("Control, Rep 1", "Control, Rep 2","Control, Rep 3", "Midbody, Rep 1", "Midbody, Rep 2", "Midbody, Rep 3"))
+
+phmap$tree_row$order <- c("Control, Rep 1", "Control, Rep 2","Control, Rep 3", "Midbody, Rep 1", "Midbody, Rep 2", "Midbody, Rep 3")
+
+phmap$tree_col$order <- c("Control, Rep 1", "Control, Rep 2","Control, Rep 3", "Midbody, Rep 1", "Midbody, Rep 2", "Midbody, Rep 3")
+
+```
+
+
+```{r pca another way}
+pca_data <- prcomp(qcinput, center = T, scale. = T) 
+
+#boxplot(qcinput, outline=F, las=2)
+#boxplot(scale(qcinput,center = T, scale = T), outline=F, las=2)
+
+pca_data_info <- summary(pca_data) 
+
+# we make a dataframe out of the rotations and will use this to plot
+pca_plot_data <- data.frame(pca_data$rotation) 
+
+# create ID column populated by row names
+pca_plot_data$ID <- rownames(pca_plot_data)
+
+# separate names into three separate identifiers
+pca_plot_data <- pca_plot_data %>% separate(col = ID, sep = "_", into = c("tx","sample","rep"))
+
+pca_plot_data$sample <- factor(pca_plot_data$sample)
+
+pca_plot_data$rep <- factor(pca_plot_data$rep)
+
+pca_plot_data$tx <- factor(pca_plot_data$tx)
+
+
+labelPosition <- pca_plot_data %>% group_by(sample, tx, rep) %>% dplyr::select(PC1, PC2) %>% summarise(mPC1=mean(PC1), mPC2=mean(PC2))
+
+# define colors for PCA plot points
+#myCols <- c("red","blue")
+
+ggplot(pca_plot_data, aes(x=PC1, y=PC2, color=tx)) +
+  geom_point(size=2) + 
+  scale_shape_manual(values = c(8, 23)) + 
+  theme_classic() +
+  scale_color_manual(values = c("blue", "grey")) +
+  xlab(paste("PC1 (%",100*round(pca_data_info$importance[2,1], digits = 3),")", sep = "")) +
+  ylab(paste("PC2 (%",100*round(pca_data_info$importance[2,2], digits = 3),")", sep = "")) 
+
+```
+
+```{r, get NET1 3'UTR }
+
+library(biomaRt)
+#ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+net1_3UTR <- getBM(attributes = c('ensembl_gene_id',
+                                'ensembl_transcript_id',
+                                '3utr'),
+                 filters = 'ensembl_gene_id',
+                 values = 'ENSG00000173848', #specify the gene of interest - or genes of interest 
+                 mart = ensembl)
+
+net1_3UTR <- net1_3UTR %>%
+  as.data.frame() %>% 
+  filter(net1_3UTR$`3utr` != "Sequence unavailable") # only want the rows with 3'UTR sequences included 
+
+net1_3UTR_max <- net1_3UTR %>% 
+  mutate(length = nchar(net1_3UTR$`3utr`)) %>% 
+  filter(length == max(length)) # we're just going to look at the longest 3'UTR isoform 
+
+# this is the actual function that counts the number of A/G in the 3'UTR 
+
+all_counts <- c()
+biggest <- c()
+count <- c()
+for (i in 1:str_length(net1_3UTR_max$`3utr`[1])) {
+  section <- substr(net1_3UTR_max$`3utr`[1], i, (i + 99)) 
+  A_G <- stringi::stri_count_fixed(section, c("A", "G"))
+  count <- c(count, sum(A_G))
+  biggest <- max(c(biggest, sum(A_G)))
+}
+
+plot_AG_net1<- as.data.frame(count)
+plot_AG_net1$start_window <- 1:nrow(plot_AG_net1)
+
+plot_AG_net1 <- plot_AG_net1 %>% mutate(AG_rich = ifelse(count >= 65, "High", "Low"))
+
+ggplot(plot_AG_net1, aes(x = start_window, y = count, color = factor(AG_rich), group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)
+
+brewer.pal(4, "Paired")
+cols <- c("#A6CEE3","#B2DF8A")
+
+plot_AG_net1[plot_AG_net1$AG_rich == "High",]
+
+```
+```{r UTR trak1}
+#TRAK2 is ENSG00000115993
+
+library(biomaRt)
+#ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+THREE_UTR <- getBM(attributes = c('ensembl_gene_id',
+                                'ensembl_transcript_id',
+                                '3utr'),
+                 filters = 'ensembl_gene_id',
+                 values = list(Localized_genes$ensembl_gene_id),
+                 mart = ensembl)
+
+THREE_UTR <- THREE_UTR %>%
+  as.data.frame() %>% 
+  filter(THREE_UTR$`3utr` != "Sequence unavailable") 
+
+THREE_UTR <- THREE_UTR %>% 
+  mutate(length = nchar(THREE_UTR$`3utr`)) %>% 
+  group_by(., ensembl_gene_id) %>% 
+  filter(length == max(length))
+
+
+for (j in 1:nrow(THREE_UTR)) {
+  count <- c()
+  biggest <- c()
+  nam <- THREE_UTR$ensembl_gene_id[j]
+  for (i in 1:str_length(THREE_UTR$`3utr`[j])) {
+    section <- substr(THREE_UTR$`3utr`[j], i, (i + 99)) 
+    A_G <- stringi::stri_count_fixed(section, c("A", "G"))
+    count <- c(count, sum(A_G))
+    biggest <- max(c(biggest, sum(A_G)))
+  }
+  gene <- as.character(Localized_genes$Gene[Localized_genes$ensembl_gene_id == as.character(nam)])
+  count <- as.data.frame(count)
+  count$start_window <- 1:nrow(count)
+  assign(gene, count)
+}
+
+```
+
+```{r plotting the UTR of lots of Genes}
+ggplot(RAB13, aes(x = start_window, y = count, color = count >= 70, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols) + 
+  ggtitle("RAB13")
+ggplot(GDF11, aes(x = start_window, y = count, color = count >= 65, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)+ 
+  ggtitle("GDF11")
+ggplot(CDC42BPG, aes(x = start_window, y = count, color = count >= 65, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)+ 
+  ggtitle("CDC42BPG")
+ggplot(TRAK2, aes(x = start_window, y = count, color = count >= 65, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)+ 
+  ggtitle("TRAK2")
+ggplot(NET1, aes(x = start_window, y = count, color = count >= 65, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)+
+  ggtitle("NET1")
+ggplot(AKAP12, aes(x = start_window, y = count, color = count >= 65, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)+
+  ggtitle("AKAP12")
+ggplot(KIF5B, aes(x = start_window, y = count, color = count >= 65, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)+ 
+  ggtitle("KIF5B")
+ggplot(PAXBP1, aes(x = start_window, y = count, color = count >= 65, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)+
+  ggtitle("PAXBP1")
+ggplot(FNBP4, aes(x = start_window, y = count, color = count >= 65, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)+ 
+  ggtitle("FNBP4")
+ggplot(OGT, aes(x = start_window, y = count, color = count >= 65, group = 1)) + geom_line() + 
+  theme_classic(16) + 
+  ylab("A/G content in 100nt window") + 
+  xlab("100nt window start site") + 
+  scale_color_manual(values = cols)+
+  ggtitle("OGT")
+```
+```{r, choosing transcripts for MPRA }
+#I want a DF that has the logFC for MB, and whether it is significantly enriched in MB, Neurite, Basal. Also want y/n if there is AG rich window. Looking possibly for trasncripts w/o the AG rich window! 
+
+
+MPRA_data <- res_df %>%  
+  left_join(., neurite_data, by = "Gene") %>% 
+  left_join(., AB_data, by = "Gene") %>% 
+  mutate(MB_enriched = ifelse(log2FoldChange > 0, "MB", "NA")) %>% 
+  mutate(Neurite_enriched = ifelse(Log2FoldChange_neurite > 0, "Neurite", "NA" )) %>% 
+  mutate(ApicalBasal_enriched = ifelse(Log2FoldChange_AB < 0, "Basal", "NA")) %>% 
+  select(ensembl_gene_id, log2FoldChange, pvalue, padj, Gene, Log2FoldChange_neurite, Log2FoldChange_AB, AB_pval, MB_enriched, Neurite_enriched, ApicalBasal_enriched) %>% unique()
+  
+table(MPRA_data$MB_enriched)
+
+length(table(MPRA_data[(MPRA_data$log2FoldChange > 0 & MPRA_data$padj < 0.05),]$ensembl_gene_id))
+
+  
+colnames(MPRA_data)[1] <- "ensembl_gene_id"
+
+
+  
+#this comes from the Counting AG r amrkdown that i have... counting the AG content in 100 nt windows
+AG_content <- df_noseq #that's a really bad name for it so sorry & renaming :) 
+colnames(AG_content)[1] <- "ensembl_gene_id"
+
+
+MPRA_data <- MPRA_data %>% left_join(., AG_content, by = "ensembl_gene_id") %>% unique()
+
+#enriched in all 3
+MPRA_data %>% filter(MB_enriched == "MB" & 
+                       Neurite_enriched == "Neurite" & 
+                       ApicalBasal_enriched == "AB") 
+
+#how many have an AG rich window?? 
+Table_MPRA <- MPRA_data %>% 
+  select(ensembl_gene_id, Gene, AG_rich, log2FoldChange, Log2FoldChange_neurite, Log2FoldChange_AB, seq_length, AG_content) %>% 
+  filter(ensembl_gene_id != "NA")
+
+A <- Table_MPRA  %>% filter(log2FoldChange > 1.5) %>% filter(AG_content / seq_length < .50) %>% filter(!(Gene %in% str_subset(Table_MPRA$Gene, "^RP"))) %>% filter(seq_length > 200)
+
+b <- Table_MPRA  %>% filter(log2FoldChange < .5 & log2FoldChange > -.5) %>% filter(AG_content / seq_length < .50) %>% filter(!(Gene %in% str_subset(Table_MPRA$Gene, "^RP"))) %>% filter(seq_length > 200)
+
+MB <-res_df[(res_df$log2FoldChange > 0 & res_df$padj < 0.05),] %>% na.omit() %>% left_join(., AG_content, by = "ensembl_gene_id") %>% unique()
+
+MB_AGrich <- res_df[(res_df$log2FoldChange > 0 & res_df$padj < 0.05),] %>% na.omit() %>% left_join(., AG_content, by = "ensembl_gene_id") %>% unique() %>% filter(AG_rich == "AG_rich")
+
+MB_notAGrich <- res_df[(res_df$log2FoldChange > 0 & res_df$padj < 0.05),] %>% na.omit() %>% left_join(., AG_content, by = "ensembl_gene_id") %>% unique() %>% filter(AG_rich == "Not")
+
+table(MB$AG_rich)
+
+write.csv(MB_AGrich, "MB_AGrich.csv")
+write.csv(MB_notAGrich, "MB_notAGrich.csv")
+```
+
+```{r, overlap with upregulaed genes in MB fed cells}
+library(readxl)
+MB_fed_up <- read_xlsx(path = "~/2022FALL_MB_figures/Fed_MB_RNAseq.xlsx", sheet = "Upregulated in High GFP")
+
+colnames(MB_fed_up)[2] <- "ensembl_gene_id"
+colnames(MB_fed_up)[3] <- "Gene"
+
+unique(MB_fed_up)
+length( MB_fed_up$ensembl_gene_id %in% res_df$ensembl_gene_id == "TRUE")
+
+res_df_1 <- res_df  %>% 
+  mutate(fed_up = ifelse(res_df$Gene %in% MB_fed_up$Gene, "Fed", "NOT"))
+
+res_df_1 <- res_df_1 %>%  left_join(., data.frame(neurite_data[,5:6]), by = "ensembl_gene_id") %>% 
+  left_join(data.frame(AB_data[,c(1,2,4)]), by = "ensembl_gene_id")
+view(neurite_data)
+FED_MB <- res_df_1 %>% 
+  mutate(MB = ifelse(res_df_1$log2FoldChange > 0, "MB_enriched", "NA")) %>% 
+  mutate(Neurite = ifelse(res_df_1$Log2FoldChange_neurite > 0, "Neurite_enriched", "NA")) %>%
+  mutate(Apical_Basal = ifelse(res_df_1$Log2FoldChange_AB < 0, "Basal_enriched", "Apical_enriched")) %>% unique()
+
+
+Filtered_FED_only <- FED_MB %>% filter(fed_up == "Fed") %>% select(Gene, ensembl_gene_id, log2FoldChange, Log2FoldChange_neurite, Log2FoldChange_AB, MB, Neurite, Apical_Basal, fed_up )
+
+write.csv(Filtered_FED_only, "2022OCT11_MBEnriched_UpregulatedinFed.csv")
+#dat <- MPRA_data %>% 
+  #mutate(fed_up = ifelse(MPRA_data$Gene %in% MB_fed_up$Gene, "Fed", "NOT"))
+
+nrow(MB_FED_delta %>% filter(fed_up == "Fed"))
+
+table(FED_MB$fed_up == "Fed" & FED_MB$log2FoldChange > 0)
+table(FED_MB$fed_up == "Fed" & FED_MB$log2FoldChange <= 0)
+
+
+```
+
+
+```{r}
+table(FED_MB$fed_up == "Fed")
+
+#so, 14/ 70 upregulated mRNA in cels Fed MB are enriched in the MB -- 21%
+#23460 in the FedMB df 
+nrow(res_df[res_df$log2FoldChange > 0, ]) #3319 are enriched in MB
+#6539 in MB RNAseq
+
+FED_MB_FULL <- read_xlsx(path = "~/Desktop/GSE131662_GFP_lo_vs_GFPhi_original.xlsx")
+FED_MB_FULL <- FED_MB_FULL %>% na.omit(.) #23455 
+colnames(FED_MB_FULL)[3] <- "Gene"
+
+nrow(left_join(FED_MB_FULL, res_df, by = "Gene"))
+nrow(FED_MB_FULL[FED_MB_FULL$logFC > 1,])
+
+# is this significant 
+#phyper( overlap, #of RNA increased in fed cells, total # of RNA remaining, # of RNA enruched in MB)
+phyper(14, 980, 23456 - 980, 3319, lower.tail = TRUE)
+
+dhyper(14, 980, 23456 - 980, 3319)
+#p-value is 6.571666e-47
+```
+```{r}
+#compare to other MB paper -- roughly for rn 
+
+RNAs <- c("NFKBIZ", "NUPR1", "PNRC1","FOS", "FOSB", "NFKBIA", "KLF4", "KLF6", "JUN", "IRF1", "ZFP36", "AREG", "H1-4", "CXCL2", "ARL4A", "BIRC3", "BTG2", "IFRD1", "SAT1", "TEX14", "KIF23", "PLK2")
+
+#HIST1H1E is H1-4
+
+res_df_1[res_df_1$Gene %in% RNAs, ]
+
+RNAs[!RNAs %in% res_df$Gene]
+
+Overlap_otherPaper <- res_df[res_df$Gene %in% RNAs, ]
+table(res_df$Gene %in% RNAs)
+
+write.csv(Overlap_otherPaper, "OverlapRNA_otherPaper.csv")
 ```
 
 ```{r}
-
 ```
-
